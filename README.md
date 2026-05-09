@@ -2,7 +2,7 @@
 
 This is a plugin for Obsidian (https://obsidian.md).
 
-This plugin will auto-switch the active window to edit mode when a keystroke is detected, and then switch back to preview mode a delay after the last keystroke is detected. This quick switching allows for a kind of WYSIWYG.
+This plugin will auto-switch the active window from reading mode to edit mode when you double-click the reading view, placing the edit cursor near the clicked text. It then switches back to reading mode after a delay from the last keystroke and keeps the reading view aligned with the edit cursor location. This quick switching allows for a kind of WYSIWYG.
 
 ## Local Installation
 The codebase is written in TypeScript and uses `rollup` / `node` for compilation; for a first time set up, all you

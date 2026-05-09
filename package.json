@@ -1,7 +1,7 @@
 {
   "name": "obsidian-autoview",
   "version": "1.0.2",
-  "description": "This plugin automatically switches the view from edit to preview after a timeout. Then, upon keystroke, switches back to edit mode. This is to allow seemless transition in a sort of WYSIWYG.",
+  "description": "This plugin automatically switches from edit to reading mode after a timeout, then switches back to edit mode on a reading-view double click near the clicked cursor location.",
   "main": "main.js",
   "scripts": {
     "dev": "rollup --config rollup.config.js -w",
