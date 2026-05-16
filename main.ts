@@ -23,6 +23,16 @@ interface EphemeralState {
 	scroll?: number
 }
 
+interface ViewAnchorState {
+  cursor: {
+    from: {ch: number, line: number},
+    to: {ch: number, line: number}
+  };
+  cursorLineOffset: number;
+  cursorLineText?: string;
+  sourceScroll?: number;
+}
+
 export default class MyPlugin extends Plugin {
   settings: MyPluginSettings;
   db: {[file_path: string]: EphemeralState;};
@@ -41,17 +51,19 @@ export default class MyPlugin extends Plugin {
       console.log('codemirror', cm);
     });
 
-    this.registerDomEvent(document, 'keydown', () => this.resetPreviewTimer());
+    this.registerDomEvent(
+        document, 'keydown',
+        (evt: KeyboardEvent) => this.handleMarkdownKeydown(evt));
 
     this.registerDomEvent(
         document, 'dblclick',
-        (evt: MouseEvent) => this.handlePreviewDoubleClick(evt));
+        (evt: MouseEvent) => this.handleMarkdownDoubleClick(evt));
   }
 
-  async handlePreviewDoubleClick(evt: MouseEvent) {
+  async handleMarkdownDoubleClick(evt: MouseEvent) {
     let markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 
-    if (!markdownView || markdownView.getMode() != 'preview') {
+    if (!markdownView) {
       return;
     }
 
@@ -62,8 +74,37 @@ export default class MyPlugin extends Plugin {
     evt.preventDefault();
     evt.stopPropagation();
 
-    let clickedState = this.getPreviewClickState(evt, markdownView);
-    await this.switchToSource(clickedState);
+    if (markdownView.getMode() == 'preview') {
+      let clickedState = this.getPreviewClickState(evt, markdownView);
+      await this.switchToSource(clickedState);
+    } else if (markdownView.getMode() == 'source') {
+      await this.switchToPreview(markdownView);
+    }
+  }
+
+  async handleMarkdownKeydown(evt: KeyboardEvent) {
+    let markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+    if (!markdownView) {
+      return;
+    }
+
+    if (markdownView.getMode() == 'source') {
+      this.resetPreviewTimer();
+      return;
+    }
+
+    if (markdownView.getMode() != 'preview' || !this.isTypingKey(evt) ||
+        this.isEditableTarget(evt.target)) {
+      return;
+    }
+
+    evt.preventDefault();
+    evt.stopPropagation();
+
+    let key = evt.key;
+    await this.switchToSource();
+    await this.applyTypingKey(key);
   }
 
   resetPreviewTimer() {
@@ -91,7 +132,8 @@ export default class MyPlugin extends Plugin {
 
       if (state && state.cursor) {
         await this.waitForEditor();
-        await this.delay(100);
+        this.setEphemeralState(state);
+        await this.waitForNextFrame();
         this.setEphemeralState(state);
       } else {
         await this.restoreEphemeralState();
@@ -99,6 +141,144 @@ export default class MyPlugin extends Plugin {
     }
 
     this.resetPreviewTimer();
+  }
+
+  async switchToPreview(markdownView: MarkdownView) {
+    if (markdownView.getMode() != 'source') {
+      return;
+    }
+
+    let st = this.getEphemeralState();
+    let anchor = this.getViewAnchorState(st);
+    this.saveEphemeralState(st);
+
+    await this.withViewOverlay(markdownView, async () => {
+      var curState = markdownView.getState();
+      curState.mode = 'preview';
+      await markdownView.setState(curState, theresult);
+      await this.scrollPreviewToAnchor(anchor || st);
+    });
+  }
+
+  isTypingKey(evt: KeyboardEvent): boolean {
+    if (evt.ctrlKey || evt.metaKey || evt.altKey || evt.isComposing) {
+      return false;
+    }
+
+    return evt.key.length == 1 ||
+        ['Enter', 'Backspace', 'Delete', 'Tab'].indexOf(evt.key) >= 0;
+  }
+
+  isEditableTarget(target: EventTarget|null): boolean {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    let tagName = target.tagName.toLowerCase();
+    return target.isContentEditable || tagName == 'input' ||
+        tagName == 'textarea' || tagName == 'select';
+  }
+
+  async applyTypingKey(key: string) {
+    await this.waitForEditor();
+
+    let editor = this.getEditor();
+    if (!editor) {
+      return;
+    }
+
+    if (key.length == 1) {
+      this.replaceEditorSelection(editor, key);
+    } else if (key == 'Enter') {
+      this.replaceEditorSelection(editor, '\n');
+    } else if (key == 'Tab') {
+      this.replaceEditorSelection(editor, '\t');
+    } else if (key == 'Backspace') {
+      this.deleteFromEditor(editor, -1);
+    } else if (key == 'Delete') {
+      this.deleteFromEditor(editor, 1);
+    }
+
+    editor.focus();
+    this.resetPreviewTimer();
+  }
+
+  replaceEditorSelection(editor: any, text: string) {
+    if (editor.replaceSelection) {
+      editor.replaceSelection(text);
+      return;
+    }
+
+    if (editor.replaceRange) {
+      let from = editor.getCursor('anchor');
+      let to = editor.getCursor('head');
+      if (this.compareEditorPositions(from, to) > 0) {
+        let swap = from;
+        from = to;
+        to = swap;
+      }
+      editor.replaceRange(text, from, to);
+    }
+  }
+
+  deleteFromEditor(editor: any, direction: number) {
+    if (!editor.getCursor || !editor.replaceRange) {
+      return;
+    }
+
+    let from = editor.getCursor('anchor');
+    let to = editor.getCursor('head');
+
+    if (this.compareEditorPositions(from, to) > 0) {
+      let swap = from;
+      from = to;
+      to = swap;
+    }
+
+    if (this.compareEditorPositions(from, to) != 0) {
+      editor.replaceRange('', from, to);
+      editor.setCursor?.(from);
+      return;
+    }
+
+    let cursor = from;
+    let deleteFrom = cursor;
+    let deleteTo = cursor;
+
+    if (direction < 0) {
+      if (cursor.ch > 0) {
+        deleteFrom = {line: cursor.line, ch: cursor.ch - 1};
+      } else if (cursor.line > 0) {
+        deleteFrom = {
+          line: cursor.line - 1,
+          ch: editor.getLine(cursor.line - 1).length
+        };
+      } else {
+        return;
+      }
+    } else {
+      let lineText = editor.getLine(cursor.line);
+      if (cursor.ch < lineText.length) {
+        deleteTo = {line: cursor.line, ch: cursor.ch + 1};
+      } else if (cursor.line < editor.lineCount() - 1) {
+        deleteTo = {line: cursor.line + 1, ch: 0};
+      } else {
+        return;
+      }
+    }
+
+    editor.replaceRange('', deleteFrom, deleteTo);
+    editor.setCursor?.(deleteFrom);
+  }
+
+  compareEditorPositions(
+      a: {line: number, ch: number},
+      b: {line: number, ch: number}): number {
+    if (a.line != b.line) {
+      return a.line - b.line;
+    }
+
+    return a.ch - b.ch;
   }
 
   getPreviewClickState(evt: MouseEvent, view: MarkdownView): EphemeralState {
@@ -458,6 +638,94 @@ export default class MyPlugin extends Plugin {
     return (markdownView as any)?.sourceMode;
   }
 
+  getViewAnchorState(state: EphemeralState): ViewAnchorState|null {
+    if (!state.cursor) {
+      return null;
+    }
+
+    let view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) {
+      return null;
+    }
+
+    let sourceScroller = this.getSourceScroller(view);
+    let cursorLineOffset = this.getSourceCursorLineOffset(
+        state.cursor.from, sourceScroller);
+
+    if (cursorLineOffset === null) {
+      cursorLineOffset = sourceScroller ? sourceScroller.clientHeight * 0.45 :
+                                          0;
+    }
+
+    return {
+      cursor: state.cursor,
+      cursorLineOffset: cursorLineOffset,
+      cursorLineText: this.getMarkdownLine(state.cursor.from.line),
+      sourceScroll: this.getSourceScrollTop(sourceScroller, state)
+    };
+  }
+
+  getSourceCursorLineOffset(
+      position: {line: number, ch: number},
+      sourceScroller: HTMLElement|null): number|null {
+    if (!sourceScroller) {
+      return null;
+    }
+
+    let coords = this.getEditorCursorWindowCoords(position);
+    if (coords) {
+      return this.clamp(
+          coords.top - sourceScroller.getBoundingClientRect().top, 0,
+          sourceScroller.clientHeight);
+    }
+
+    let view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    let lineEl = view ? this.findSourceActiveLineElement(view) : null;
+    if (!lineEl) {
+      return null;
+    }
+
+    return this.clamp(
+        lineEl.getBoundingClientRect().top -
+            sourceScroller.getBoundingClientRect().top,
+        0, sourceScroller.clientHeight);
+  }
+
+  getEditorCursorWindowCoords(position: {line: number, ch: number}):
+      {top: number, bottom: number}|null {
+    let sourceMode = this.getSourceMode();
+    let cmEditor = sourceMode?.cmEditor;
+
+    if (cmEditor?.cursorCoords) {
+      return cmEditor.cursorCoords(position, 'window');
+    }
+
+    return null;
+  }
+
+  getSourceScrollTop(
+      sourceScroller: HTMLElement|null, state: EphemeralState): number|undefined {
+    if (sourceScroller) {
+      return sourceScroller.scrollTop;
+    }
+
+    return state.scroll;
+  }
+
+  getSourceScroller(view: MarkdownView): HTMLElement|null {
+    return this.findFirstElement(view.containerEl, [
+      '.cm-scroller',
+      '.CodeMirror-scroll',
+      '.markdown-source-view'
+    ]);
+  }
+
+  findSourceActiveLineElement(view: MarkdownView): HTMLElement|null {
+    return view.containerEl.querySelector(
+               '.cm-active.cm-line, .cm-activeLine, .CodeMirror-activeline, .CodeMirror-activeline-background') as
+        HTMLElement;
+  }
+
   async saveEphemeralState(st: EphemeralState) {
     let fileName = this.app.workspace.getActiveFile()?.path;
     this.db[fileName] = st;
@@ -467,12 +735,7 @@ export default class MyPlugin extends Plugin {
     await this.delay(this.settings.timoutduration * 1000);
     if (a == this.lastTime) {
       if (markdownLeave.getMode() == 'source') {
-        let st = this.getEphemeralState();
-        this.saveEphemeralState(st);
-        var curState = markdownLeave.getState();
-        curState.mode = 'preview';
-        await markdownLeave.setState(curState, theresult);
-        await this.scrollPreviewToCursor(st);
+        await this.switchToPreview(markdownLeave);
       }
     }
   }
@@ -499,23 +762,12 @@ export default class MyPlugin extends Plugin {
           cursor: {from: from, to: to},
           scroll: state.scroll
         });
-        this.scrollEditorIntoView(editor, from, to);
-        editor?.focus();
-        return;
       }
 
-      if (this.settings.rememberscroll) {
-        if (editor) {
-          this.setEditorSelection(editor, from, to);
-          this.scrollEditorIntoView(editor, from, to);
-          editor.focus();
-        }
-      } else {
-        if (editor) {
-          this.setEditorSelection(editor, from, to);
-          this.scrollEditorIntoView(editor, from, to);
-          editor.focus();
-        }
+      if (editor) {
+        this.setEditorSelection(editor, from, to);
+        this.scrollEditorIntoView(editor, from, to);
+        editor.focus();
       }
     }
   }
@@ -529,6 +781,47 @@ export default class MyPlugin extends Plugin {
 
   async delay(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async waitForNextFrame() {
+    return new Promise(resolve => requestAnimationFrame(resolve));
+  }
+
+  async withViewOverlay(
+      markdownView: MarkdownView, action: () => Promise<void>) {
+    let el = markdownView.containerEl;
+    let previousVisibility = el.style.visibility;
+    let overlay = this.createViewOverlay(el);
+
+    el.style.visibility = 'hidden';
+
+    try {
+      await Promise.race([action(), this.delay(900)]);
+      await this.waitForNextFrame();
+    } finally {
+      el.style.visibility = previousVisibility;
+      overlay.remove();
+    }
+  }
+
+  createViewOverlay(el: HTMLElement): HTMLElement {
+    let rect = el.getBoundingClientRect();
+    let overlay = el.cloneNode(true) as HTMLElement;
+    let computed = window.getComputedStyle(el);
+
+    overlay.style.position = 'fixed';
+    overlay.style.left = rect.left + 'px';
+    overlay.style.top = rect.top + 'px';
+    overlay.style.width = rect.width + 'px';
+    overlay.style.height = rect.height + 'px';
+    overlay.style.margin = '0';
+    overlay.style.pointerEvents = 'none';
+    overlay.style.overflow = 'hidden';
+    overlay.style.zIndex = '1000';
+    overlay.style.background = computed.background;
+
+    document.body.appendChild(overlay);
+    return overlay;
   }
 
   async restoreEphemeralState() {
@@ -557,7 +850,7 @@ export default class MyPlugin extends Plugin {
     }
   }
 
-  async scrollPreviewToCursor(state: EphemeralState) {
+  async scrollPreviewToAnchor(state: EphemeralState|ViewAnchorState) {
     if (!this.settings.rememberscroll || !state.cursor) {
       return;
     }
@@ -567,27 +860,238 @@ export default class MyPlugin extends Plugin {
 
     let line = state.cursor.from.line;
     for (let i = 0; i < 20; i++) {
-      let lineEl = this.findPreviewLineElement(view, line);
-      if (lineEl) {
-        lineEl.scrollIntoView({block: 'center'});
+      let lineEl = this.findPreviewAnchorElement(view, line, state);
+      let scroller = this.getPreviewScroller(view);
+      if (lineEl && scroller) {
+        this.scrollElementToPreviewLine(scroller, lineEl, line, view, state);
+        await this.waitForNextFrame();
+        this.scrollElementToPreviewLine(scroller, lineEl, line, view, state);
         return;
       }
       await this.delay(10);
     }
   }
 
-  findPreviewLineElement(view: MarkdownView, line: number): HTMLElement|null {
+  findPreviewAnchorElement(
+      view: MarkdownView, line: number,
+      state: EphemeralState|ViewAnchorState): HTMLElement|null {
+    let textEl = this.findPreviewTextElement(view, state);
+    if (textEl) {
+      return textEl;
+    }
+
+    return this.findPreviewLineElement(view, line);
+  }
+
+  scrollElementToPreviewLine(
+      scroller: HTMLElement, target: HTMLElement, line: number,
+      view: MarkdownView, state: EphemeralState|ViewAnchorState) {
+    let targetOffset = this.getPreviewAnchorOffset(target, line, view, state);
+    let viewportOffset = this.getAnchorViewportOffset(state, scroller);
+    let previousScrollBehavior = scroller.style.scrollBehavior;
+    let targetScrollTop = scroller.scrollTop +
+        target.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top + targetOffset - viewportOffset;
+
+    scroller.style.scrollBehavior = 'auto';
+    scroller.scrollTop = this.clamp(
+        targetScrollTop, 0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.style.scrollBehavior = previousScrollBehavior;
+  }
+
+  getPreviewAnchorOffset(
+      target: HTMLElement, line: number, view: MarkdownView,
+      state: EphemeralState|ViewAnchorState): number {
+    let textOffset = this.getPreviewTextOffset(target, state);
+    if (textOffset !== null) {
+      return textOffset;
+    }
+
+    return this.getPreviewLineOffset(target, line, view);
+  }
+
+  getAnchorViewportOffset(
+      state: EphemeralState|ViewAnchorState, scroller: HTMLElement): number {
+    if ('cursorLineOffset' in state && !isNaN(state.cursorLineOffset)) {
+      return this.clamp(state.cursorLineOffset, 0, scroller.clientHeight);
+    }
+
+    return scroller.clientHeight * 0.45;
+  }
+
+  findPreviewTextElement(
+      view: MarkdownView, state: EphemeralState|ViewAnchorState):
+      HTMLElement|null {
+    if (!('cursorLineText' in state) || !state.cursorLineText) {
+      return null;
+    }
+
+    let searchText = this.normalizeDisplayText(state.cursorLineText);
+    if (!searchText) {
+      return null;
+    }
+
+    let selectors = [
+      'p',
+      'li',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'h5',
+      'h6',
+      'blockquote',
+      'pre',
+      'td',
+      'th'
+    ].join(',');
+    let candidates = Array.from(
+        view.containerEl.querySelectorAll(selectors)) as HTMLElement[];
+
+    candidates = candidates.filter(el => {
+      let text = this.normalizeDisplayText(el.innerText || el.textContent || '');
+      let rect = el.getBoundingClientRect();
+      return rect.height > 0 && text.includes(searchText);
+    });
+
+    if (candidates.length == 0) {
+      return null;
+    }
+
+    return candidates.sort((a, b) => {
+      let aRect = a.getBoundingClientRect();
+      let bRect = b.getBoundingClientRect();
+      let aText = (a.innerText || a.textContent || '').length;
+      let bText = (b.innerText || b.textContent || '').length;
+
+      if (aRect.height != bRect.height) {
+        return aRect.height - bRect.height;
+      }
+
+      return aText - bText;
+    })[0];
+  }
+
+  getPreviewTextOffset(
+      target: HTMLElement, state: EphemeralState|ViewAnchorState):
+      number|null {
+    if (!('cursorLineText' in state) || !state.cursorLineText) {
+      return null;
+    }
+
+    let searchText = this.normalizeDisplayText(state.cursorLineText);
+    if (!searchText) {
+      return null;
+    }
+
+    let renderedLines = (target.innerText || target.textContent || '')
+                            .split(/\n+/)
+                            .map(text => this.normalizeDisplayText(text))
+                            .filter(text => text.length > 0);
+    let lineIndex = renderedLines.findIndex(text => text.includes(searchText));
+
+    if (lineIndex < 0) {
+      return null;
+    }
+
+    let rect = target.getBoundingClientRect();
+    return rect.height * (lineIndex / Math.max(renderedLines.length, 1));
+  }
+
+  getPreviewLineOffset(
+      target: HTMLElement, line: number, view: MarkdownView): number {
+    let startLine = this.getPreviewLineNumber(target);
+    if (startLine === null) {
+      return 0;
+    }
+
+    let nextLine = this.getNextPreviewLineNumber(view, startLine);
+    if (nextLine === null || nextLine <= startLine) {
+      return 0;
+    }
+
+    let ratio = this.clamp((line - startLine) / (nextLine - startLine), 0, 1);
+    return target.getBoundingClientRect().height * ratio;
+  }
+
+  getNextPreviewLineNumber(view: MarkdownView, afterLine: number): number|null {
     let els = Array.from(
         view.containerEl.querySelectorAll('[data-line]')) as HTMLElement[];
+    let nextLine: number|null = null;
+
+    for (let el of els) {
+      let line = this.getPreviewLineNumber(el);
+      if (line !== null && line > afterLine &&
+          (nextLine === null || line < nextLine)) {
+        nextLine = line;
+      }
+    }
+
+    return nextLine;
+  }
+
+  getPreviewScroller(view: MarkdownView): HTMLElement|null {
+    return this.findScrollableElement(view.containerEl, [
+      '.markdown-preview-view',
+      '.markdown-reading-view',
+      '.view-content'
+    ]);
+  }
+
+  findScrollableElement(
+      root: HTMLElement, selectors: string[]): HTMLElement|null {
+    for (let selector of selectors) {
+      let el = root.querySelector(selector) as HTMLElement;
+      if (el && this.canScroll(el)) {
+        return el;
+      }
+    }
+
+    if (this.canScroll(root)) {
+      return root;
+    }
+
+    let els = Array.from(root.querySelectorAll('*')) as HTMLElement[];
+    for (let el of els) {
+      if (this.canScroll(el)) {
+        return el;
+      }
+    }
+
+    return null;
+  }
+
+  findFirstElement(root: HTMLElement, selectors: string[]): HTMLElement|null {
+    for (let selector of selectors) {
+      let el = root.querySelector(selector) as HTMLElement;
+      if (el) {
+        return el;
+      }
+    }
+
+    return null;
+  }
+
+  canScroll(el: HTMLElement): boolean {
+    return el.clientHeight > 0 && el.scrollHeight > el.clientHeight;
+  }
+
+  findPreviewLineElement(view: MarkdownView, line: number): HTMLElement|null {
+    let els = this.getSortedPreviewLineElements(view);
     let nearestEl: HTMLElement|null = null;
     let nearestDistance = Number.MAX_SAFE_INTEGER;
 
-    for (let el of els) {
-      let value = el.getAttribute('data-line');
-      let match = value?.match(/\d+/);
-      if (!match) continue;
+    for (let i = 0; i < els.length; i++) {
+      let el = els[i];
+      let elLine = this.getPreviewLineNumber(el);
+      if (elLine === null) continue;
 
-      let elLine = Number(match[0]);
+      let nextLine = i < els.length - 1 ? this.getPreviewLineNumber(els[i + 1]) :
+                                         null;
+      if (elLine <= line && (nextLine === null || line < nextLine)) {
+        return el;
+      }
+
       let distance = Math.abs(line - elLine);
       if (distance < nearestDistance) {
         nearestDistance = distance;
@@ -596,6 +1100,21 @@ export default class MyPlugin extends Plugin {
     }
 
     return nearestEl;
+  }
+
+  getSortedPreviewLineElements(view: MarkdownView): HTMLElement[] {
+    let els = Array.from(
+        view.containerEl.querySelectorAll('[data-line]')) as HTMLElement[];
+
+    return els.sort((a, b) => {
+      let aLine = this.getPreviewLineNumber(a);
+      let bLine = this.getPreviewLineNumber(b);
+
+      if (aLine === null && bLine === null) return 0;
+      if (aLine === null) return 1;
+      if (bLine === null) return -1;
+      return aLine - bLine;
+    });
   }
 
   findNearestPreviewLineElement(
