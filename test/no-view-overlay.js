@@ -26,6 +26,27 @@ assert(
 
 assert(
   source.includes('let pendingState = this.consumePendingPreviewClickState(markdownView);') &&
-      source.includes('await this.switchToSource(pendingState);'),
+      source.includes('await this.switchToSource(pendingState, true);'),
   'typing from reading mode should switch to source at the last clicked preview position'
+);
+
+assert(
+  source.includes('autoPreviewActive: boolean;'),
+  'plugin should track whether edit mode was entered from reading mode by Autoview'
+);
+
+assert(
+  source.includes("await this.switchToSource(clickedState, true);") &&
+      source.includes('await this.switchToSource(pendingState, true);'),
+  'only reading-mode double-click and typing switches should enable the auto-preview timeout'
+);
+
+assert(
+  /if \(markdownView\.getMode\(\) == 'source'\) {\s*if \(this\.autoPreviewActive\) {\s*this\.resetPreviewTimer\(\);\s*}\s*return;\s*}/.test(source),
+  'normal typing in source mode should not start or reset the auto-preview timeout'
+);
+
+assert(
+  /async switchToPreview\(markdownView: MarkdownView\)[\s\S]*this\.autoPreviewActive = false;[\s\S]*await this\.scrollPreviewToAnchor/.test(source),
+  'returning to reading mode should clear the auto-preview timeout state'
 );

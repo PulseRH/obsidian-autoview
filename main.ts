@@ -38,12 +38,14 @@ export default class MyPlugin extends Plugin {
   db: {[file_path: string]: EphemeralState;};
   lastTime: number;
   pendingPreviewClickState: {filePath?: string, state: EphemeralState}|null;
+  autoPreviewActive: boolean;
 
   async onload() {
     console.log('loading plugin autoview');
     this.lastTime = 1;
     this.db = {};
     this.pendingPreviewClickState = null;
+    this.autoPreviewActive = false;
 
     await this.loadSettings();
 
@@ -73,6 +75,8 @@ export default class MyPlugin extends Plugin {
       this.clearPendingPreviewClickState();
       return;
     }
+
+    this.autoPreviewActive = false;
 
     if (!markdownView.containerEl.contains(evt.target as Node) ||
         this.isEditableTarget(evt.target)) {
@@ -104,7 +108,7 @@ export default class MyPlugin extends Plugin {
 
     if (markdownView.getMode() == 'preview') {
       let clickedState = this.getPreviewClickState(evt, markdownView);
-      await this.switchToSource(clickedState);
+      await this.switchToSource(clickedState, true);
     } else if (markdownView.getMode() == 'source') {
       await this.switchToPreview(markdownView);
     }
@@ -118,7 +122,9 @@ export default class MyPlugin extends Plugin {
     }
 
     if (markdownView.getMode() == 'source') {
-      this.resetPreviewTimer();
+      if (this.autoPreviewActive) {
+        this.resetPreviewTimer();
+      }
       return;
     }
 
@@ -132,7 +138,7 @@ export default class MyPlugin extends Plugin {
 
     let key = evt.key;
     let pendingState = this.consumePendingPreviewClickState(markdownView);
-    await this.switchToSource(pendingState);
+    await this.switchToSource(pendingState, true);
     await this.applyTypingKey(key);
   }
 
@@ -147,7 +153,7 @@ export default class MyPlugin extends Plugin {
     this.backtopreview(this.lastTime, markdownView);
   }
 
-  async switchToSource(state?: EphemeralState) {
+  async switchToSource(state?: EphemeralState, enableAutoPreview = false) {
     let markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 
     if (!markdownView) {
@@ -156,6 +162,7 @@ export default class MyPlugin extends Plugin {
 
     if (markdownView.getMode() == 'preview') {
       this.clearPendingPreviewClickState();
+      this.autoPreviewActive = enableAutoPreview;
 
       var curState = markdownView.getState();
       curState.mode = 'source';
@@ -171,7 +178,9 @@ export default class MyPlugin extends Plugin {
       }
     }
 
-    this.resetPreviewTimer();
+    if (this.autoPreviewActive) {
+      this.resetPreviewTimer();
+    }
   }
 
   async switchToPreview(markdownView: MarkdownView) {
@@ -186,6 +195,7 @@ export default class MyPlugin extends Plugin {
     var curState = markdownView.getState();
     curState.mode = 'preview';
     await markdownView.setState(curState, theresult);
+    this.autoPreviewActive = false;
     await this.scrollPreviewToAnchor(anchor || st);
   }
 
@@ -254,7 +264,9 @@ export default class MyPlugin extends Plugin {
     }
 
     editor.focus();
-    this.resetPreviewTimer();
+    if (this.autoPreviewActive) {
+      this.resetPreviewTimer();
+    }
   }
 
   replaceEditorSelection(editor: any, text: string) {
