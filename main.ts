@@ -37,11 +37,13 @@ export default class MyPlugin extends Plugin {
   settings: MyPluginSettings;
   db: {[file_path: string]: EphemeralState;};
   lastTime: number;
+  pendingPreviewClickState: {filePath?: string, state: EphemeralState}|null;
 
   async onload() {
     console.log('loading plugin autoview');
     this.lastTime = 1;
     this.db = {};
+    this.pendingPreviewClickState = null;
 
     await this.loadSettings();
 
@@ -56,8 +58,34 @@ export default class MyPlugin extends Plugin {
         (evt: KeyboardEvent) => this.handleMarkdownKeydown(evt));
 
     this.registerDomEvent(
+        document, 'click',
+        (evt: MouseEvent) => this.handleMarkdownClick(evt));
+
+    this.registerDomEvent(
         document, 'dblclick',
         (evt: MouseEvent) => this.handleMarkdownDoubleClick(evt));
+  }
+
+  handleMarkdownClick(evt: MouseEvent) {
+    let markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+    if (!markdownView || markdownView.getMode() != 'preview') {
+      this.clearPendingPreviewClickState();
+      return;
+    }
+
+    if (!markdownView.containerEl.contains(evt.target as Node) ||
+        this.isEditableTarget(evt.target)) {
+      return;
+    }
+
+    let clickedState = this.getPreviewClickState(evt, markdownView);
+    if (clickedState.cursor) {
+      this.pendingPreviewClickState = {
+        filePath: this.app.workspace.getActiveFile()?.path,
+        state: clickedState
+      };
+    }
   }
 
   async handleMarkdownDoubleClick(evt: MouseEvent) {
@@ -103,7 +131,8 @@ export default class MyPlugin extends Plugin {
     evt.stopPropagation();
 
     let key = evt.key;
-    await this.switchToSource();
+    let pendingState = this.consumePendingPreviewClickState(markdownView);
+    await this.switchToSource(pendingState);
     await this.applyTypingKey(key);
   }
 
@@ -126,6 +155,8 @@ export default class MyPlugin extends Plugin {
     }
 
     if (markdownView.getMode() == 'preview') {
+      this.clearPendingPreviewClickState();
+
       var curState = markdownView.getState();
       curState.mode = 'source';
       await markdownView.setState(curState, theresult);
@@ -152,12 +183,10 @@ export default class MyPlugin extends Plugin {
     let anchor = this.getViewAnchorState(st);
     this.saveEphemeralState(st);
 
-    await this.withViewOverlay(markdownView, async () => {
-      var curState = markdownView.getState();
-      curState.mode = 'preview';
-      await markdownView.setState(curState, theresult);
-      await this.scrollPreviewToAnchor(anchor || st);
-    });
+    var curState = markdownView.getState();
+    curState.mode = 'preview';
+    await markdownView.setState(curState, theresult);
+    await this.scrollPreviewToAnchor(anchor || st);
   }
 
   isTypingKey(evt: KeyboardEvent): boolean {
@@ -167,6 +196,31 @@ export default class MyPlugin extends Plugin {
 
     return evt.key.length == 1 ||
         ['Enter', 'Backspace', 'Delete', 'Tab'].indexOf(evt.key) >= 0;
+  }
+
+  consumePendingPreviewClickState(markdownView: MarkdownView): EphemeralState|
+      undefined {
+    let pending = this.pendingPreviewClickState;
+    this.clearPendingPreviewClickState();
+
+    if (!pending || !pending.state.cursor) {
+      return undefined;
+    }
+
+    let activeFilePath = this.app.workspace.getActiveFile()?.path;
+    if (pending.filePath && pending.filePath != activeFilePath) {
+      return undefined;
+    }
+
+    if (markdownView.getMode() != 'preview') {
+      return undefined;
+    }
+
+    return pending.state;
+  }
+
+  clearPendingPreviewClickState() {
+    this.pendingPreviewClickState = null;
   }
 
   isEditableTarget(target: EventTarget|null): boolean {
@@ -785,43 +839,6 @@ export default class MyPlugin extends Plugin {
 
   async waitForNextFrame() {
     return new Promise(resolve => requestAnimationFrame(resolve));
-  }
-
-  async withViewOverlay(
-      markdownView: MarkdownView, action: () => Promise<void>) {
-    let el = markdownView.containerEl;
-    let previousVisibility = el.style.visibility;
-    let overlay = this.createViewOverlay(el);
-
-    el.style.visibility = 'hidden';
-
-    try {
-      await action();
-      await this.waitForNextFrame();
-    } finally {
-      el.style.visibility = previousVisibility;
-      overlay.remove();
-    }
-  }
-
-  createViewOverlay(el: HTMLElement): HTMLElement {
-    let rect = el.getBoundingClientRect();
-    let overlay = el.cloneNode(true) as HTMLElement;
-    let computed = window.getComputedStyle(el);
-
-    overlay.style.position = 'fixed';
-    overlay.style.left = rect.left + 'px';
-    overlay.style.top = rect.top + 'px';
-    overlay.style.width = rect.width + 'px';
-    overlay.style.height = rect.height + 'px';
-    overlay.style.margin = '0';
-    overlay.style.pointerEvents = 'none';
-    overlay.style.overflow = 'hidden';
-    overlay.style.zIndex = '1000';
-    overlay.style.background = computed.background;
-
-    document.body.appendChild(overlay);
-    return overlay;
   }
 
   async restoreEphemeralState() {
