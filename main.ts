@@ -796,7 +796,7 @@ export default class MyPlugin extends Plugin {
     el.style.visibility = 'hidden';
 
     try {
-      await Promise.race([action(), this.delay(900)]);
+      await action();
       await this.waitForNextFrame();
     } finally {
       el.style.visibility = previousVisibility;
@@ -863,13 +863,91 @@ export default class MyPlugin extends Plugin {
       let lineEl = this.findPreviewAnchorElement(view, line, state);
       let scroller = this.getPreviewScroller(view);
       if (lineEl && scroller) {
-        this.scrollElementToPreviewLine(scroller, lineEl, line, view, state);
-        await this.waitForNextFrame();
-        this.scrollElementToPreviewLine(scroller, lineEl, line, view, state);
+        await this.alignPreviewAnchorWhenStable(view, line, state);
         return;
       }
       await this.delay(10);
     }
+  }
+
+  async alignPreviewAnchorWhenStable(
+      view: MarkdownView, line: number, state: EphemeralState|ViewAnchorState) {
+    let lastMetrics: {
+      top: number,
+      height: number,
+      scrollTop: number,
+      scrollHeight: number,
+      clientHeight: number
+    }|null = null;
+    let stableFrames = 0;
+
+    for (let i = 0; i < 45; i++) {
+      let target = this.findPreviewAnchorElement(view, line, state);
+      let scroller = this.getPreviewScroller(view);
+
+      if (!target || !scroller) {
+        stableFrames = 0;
+        await this.waitForNextFrame();
+        continue;
+      }
+
+      this.scrollElementToPreviewLine(scroller, target, line, view, state);
+      await this.waitForNextFrame();
+
+      let rect = target.getBoundingClientRect();
+      let metrics = {
+        top: rect.top,
+        height: rect.height,
+        scrollTop: scroller.scrollTop,
+        scrollHeight: scroller.scrollHeight,
+        clientHeight: scroller.clientHeight
+      };
+
+      if (lastMetrics && this.areScrollMetricsStable(lastMetrics, metrics)) {
+        stableFrames++;
+      } else {
+        stableFrames = 0;
+      }
+
+      lastMetrics = metrics;
+
+      if (stableFrames >= 2) {
+        target = this.findPreviewAnchorElement(view, line, state) || target;
+        scroller = this.getPreviewScroller(view) || scroller;
+        this.scrollElementToPreviewLine(scroller, target, line, view, state);
+        await this.waitForNextFrame();
+        this.scrollElementToPreviewLine(scroller, target, line, view, state);
+        return;
+      }
+    }
+
+    let target = this.findPreviewAnchorElement(view, line, state);
+    let scroller = this.getPreviewScroller(view);
+    if (target && scroller) {
+      this.scrollElementToPreviewLine(scroller, target, line, view, state);
+    }
+  }
+
+  areScrollMetricsStable(
+      a: {
+        top: number,
+        height: number,
+        scrollTop: number,
+        scrollHeight: number,
+        clientHeight: number
+      },
+      b: {
+        top: number,
+        height: number,
+        scrollTop: number,
+        scrollHeight: number,
+        clientHeight: number
+      }): boolean {
+    return Math.abs(a.top - b.top) < 0.5 &&
+        Math.abs(a.height - b.height) < 0.5 &&
+        Math.abs(a.scrollTop - b.scrollTop) < 0.5 &&
+        Math.abs(a.scrollHeight - b.scrollHeight) < 0.5 &&
+        Math.abs(a.clientHeight - b.clientHeight) < 0.5;
   }
 
   findPreviewAnchorElement(
